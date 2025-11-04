@@ -16,6 +16,7 @@ package sub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -41,13 +42,25 @@ var (
 	cfgDir           string
 	showVersion      bool
 	strictConfigMode bool
+
+	inlineClientConfig v1.ClientCommonConfig
+	inlineProxyName    = "default"
+	inlineLocalIP      = "127.0.0.1"
+	inlineLocalPort    = 5555
+	inlineRemotePort   = 55555
 )
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "./frpc.ini", "config file of frpc")
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file of frpc (default: try ./frpc.ini if present)")
 	rootCmd.PersistentFlags().StringVarP(&cfgDir, "config_dir", "", "", "config directory, run one frpc service for each file in config directory")
 	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "version of frpc")
 	rootCmd.PersistentFlags().BoolVarP(&strictConfigMode, "strict_config", "", true, "strict config parsing mode, unknown fields will cause an errors")
+
+	config.RegisterClientCommonConfigFlags(rootCmd, &inlineClientConfig)
+	rootCmd.PersistentFlags().StringVar(&inlineProxyName, "inline-proxy-name", inlineProxyName, "proxy name used when config file is omitted")
+	rootCmd.PersistentFlags().StringVar(&inlineLocalIP, "inline-local-ip", inlineLocalIP, "local service ip used when config file is omitted")
+	rootCmd.PersistentFlags().IntVar(&inlineLocalPort, "inline-local-port", inlineLocalPort, "local service port used when config file is omitted")
+	rootCmd.PersistentFlags().IntVar(&inlineRemotePort, "inline-remote-port", inlineRemotePort, "remote port exposed on frps when config file is omitted")
 }
 
 var rootCmd = &cobra.Command{
@@ -112,6 +125,18 @@ func handleTermSignal(svr *client.Service) {
 }
 
 func runClient(cfgFilePath string) error {
+	if cfgFilePath == "" {
+		if _, err := os.Stat("./frpc.ini"); err == nil {
+			cfgFilePath = "./frpc.ini"
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+
+	if cfgFilePath == "" {
+		return runClientWithInlineConfig()
+	}
+
 	cfg, proxyCfgs, visitorCfgs, isLegacyFormat, err := config.LoadClientConfig(cfgFilePath, strictConfigMode)
 	if err != nil {
 		return err
@@ -165,4 +190,45 @@ func startService(
 		go handleTermSignal(svr)
 	}
 	return svr.Run(context.Background())
+}
+
+func runClientWithInlineConfig() error {
+	cfg := inlineClientConfig
+	if err := cfg.Complete(); err != nil {
+		return err
+	}
+
+	tcpProxy := &v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: inlineProxyName,
+			Type: string(v1.ProxyTypeTCP),
+			ProxyBackend: v1.ProxyBackend{
+				LocalIP:   inlineLocalIP,
+				LocalPort: inlineLocalPort,
+			},
+		},
+		RemotePort: inlineRemotePort,
+	}
+
+	tcpProxy.Complete(cfg.User)
+
+	proxyCfgs := []v1.ProxyConfigurer{tcpProxy}
+
+	if len(cfg.FeatureGates) > 0 {
+		if err := featuregate.SetFromMap(cfg.FeatureGates); err != nil {
+			return err
+		}
+	}
+
+	warning, err := validation.ValidateAllClientConfig(&cfg, proxyCfgs, nil)
+	if warning != nil {
+		fmt.Printf("WARNING: %v\n", warning)
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("start frpc service with inline config: local %s:%d -> remote :%d\n", inlineLocalIP, inlineLocalPort, inlineRemotePort)
+
+	return startService(&cfg, proxyCfgs, nil, "inline")
 }
