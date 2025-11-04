@@ -27,17 +27,27 @@ jobs:
           chmod +x package.sh
           ./package.sh
 
+      - name: Build standalone linux binaries
+        run: |
+          mkdir -p release/bin
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -tags frpc -o release/bin/frpc_linux_amd64 ./cmd/frpc
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -tags frps -o release/bin/frps_linux_amd64 ./cmd/frps
+
       - name: Upload release packages artifact
         uses: actions/upload-artifact@v4
         with:
           name: frp-packages
-          path: release/packages/
+          path: |
+            release/packages/
+            release/bin/
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/packages/**
+          files: |
+            release/packages/**
+            release/bin/**
           body_path: Release.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
